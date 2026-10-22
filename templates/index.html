@@ -3,70 +3,157 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>Network Monitor</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <main class="shell">
+
+    <!-- Header: title and live monitoring status -->
     <header class="topbar">
       <div>
-        <p class="eyebrow">NETWORK OPERATIONS</p>
+        <p class="eyebrow">Network operations</p>
         <h1>Network Monitor</h1>
-        <p class="subhead">A lightweight dashboard for connectivity, latency, and uptime checks.</p>
+        <p class="subhead">Connectivity and latency checks for hosts you own or are authorized to monitor.</p>
       </div>
-      <div class="live"><span class="pulse"></span> Local monitoring</div>
+      <div id="monitor-pill" class="pill pill-wait" role="status" aria-live="polite">
+        <span class="dot"></span><span id="monitor-pill-text">Connecting…</span>
+      </div>
     </header>
 
-    <section class="metrics">
-      <article class="metric"><span>Monitored targets</span><strong id="total">—</strong><small>Enabled hosts</small></article>
-      <article class="metric"><span>Online</span><strong id="up" class="good">—</strong><small>Responding to ping</small></article>
-      <article class="metric"><span>Offline / no reply</span><strong id="down" class="bad">—</strong><small>May block ICMP</small></article>
-      <article class="metric"><span>Average latency</span><strong id="latency">—</strong><small>Across responding hosts</small></article>
+    <!-- Shown when the server cannot be reached or a request fails -->
+    <div id="banner" class="banner" role="alert" hidden>
+      <span id="banner-text"></span>
+      <button type="button" id="banner-close" class="icon-btn" aria-label="Dismiss message">✕</button>
+    </div>
+
+    <!-- Summary cards -->
+    <section class="cards" aria-label="Summary">
+      <article class="card">
+        <span class="card-label">Monitored hosts</span>
+        <strong id="card-total" class="card-value loading">—</strong>
+        <small id="card-total-note">Enabled targets</small>
+      </article>
+      <article class="card">
+        <span class="card-label">Online</span>
+        <strong id="card-up" class="card-value tone-up loading">—</strong>
+        <small>Replied to the latest ping</small>
+      </article>
+      <article class="card">
+        <span class="card-label">No ping reply</span>
+        <strong id="card-down" class="card-value tone-warn loading">—</strong>
+        <small id="card-down-note">Offline, or blocking ICMP</small>
+      </article>
+      <article class="card">
+        <span class="card-label">Average latency</span>
+        <strong id="card-latency" class="card-value loading">—</strong>
+        <small>Latest reply from each online host</small>
+      </article>
     </section>
 
-    <section class="panel">
+    <!-- Hosts table -->
+    <section class="panel" aria-labelledby="hosts-title">
       <div class="panel-heading">
-        <div><h2>Monitored hosts</h2><p id="monitor-status" role="status">Loading monitor status…</p></div>
+        <div>
+          <h2 id="hosts-title">Monitored hosts</h2>
+          <p id="monitor-status" class="muted">Loading monitor status…</p>
+        </div>
         <div class="panel-actions">
-          <form id="interval-form" class="interval-form">
+          <form id="interval-form" class="interval-form" novalidate>
             <label for="interval">Check every</label>
-            <input id="interval" type="number" min="15" max="300" step="1" required aria-describedby="interval-help">
-            <span id="interval-help">sec (15–300)</span>
-            <button type="submit" class="secondary">Save</button>
+            <input id="interval" type="number" min="15" max="300" step="1" inputmode="numeric" aria-describedby="interval-help">
+            <span id="interval-help" class="muted">sec (15–300)</span>
+            <button type="submit" class="btn btn-secondary" id="interval-save">Save</button>
           </form>
-          <button id="refresh" class="secondary">Check now ↻</button>
+          <button type="button" id="check-now" class="btn btn-primary">Check now</button>
         </div>
       </div>
+
       <div class="table-wrap">
-        <table>
-          <thead><tr><th>Host</th><th>Address</th><th>Status</th><th>Latency</th><th>Last checked</th><th>Reply rate (24h)</th><th>Actions</th></tr></thead>
-          <tbody id="targets"><tr><td colspan="7" class="empty">Loading monitor data…</td></tr></tbody>
+        <table class="hosts-table">
+          <thead>
+            <tr>
+              <th scope="col">Host</th>
+              <th scope="col">Status</th>
+              <th scope="col">Latency</th>
+              <th scope="col">Last checked</th>
+              <th scope="col">Reply rate (24h)</th>
+              <th scope="col"><span class="visually-hidden">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody id="targets">
+            <tr><td colspan="6" class="empty"><span class="spinner" aria-hidden="true"></span> Loading hosts…</td></tr>
+          </tbody>
         </table>
       </div>
-      <p class="note">A failed ping does not always mean a host is down. Some networks block ICMP traffic.</p>
-      <p class="note"><strong>Reply rate</strong> = checks that got a ping reply ÷ checks recorded in the last 24 hours.
-        It only counts checks that actually ran: time when this app was closed, the Mac was asleep, or the host was paused is not included.</p>
+
+      <details class="explainer">
+        <summary>What do these statuses and numbers mean?</summary>
+        <ul>
+          <li><span class="status status-up">Online</span> An ICMP echo reply came back.</li>
+          <li><span class="status status-warn">No reply</span> No reply arrived in time. The host may be offline, <em>or</em> a firewall may be blocking ping while the host works normally.</li>
+          <li><span class="status status-bad">DNS failed</span> The hostname could not be turned into an IP address, so no ping was sent.</li>
+          <li><span class="status status-bad">Check error</span> The ping command itself could not run.</li>
+          <li><strong>Reply rate</strong> = checks that got a reply ÷ checks recorded in the last 24 hours. Only checks that actually ran are counted: time when this app was closed, the Mac was asleep, or the host was paused is not included.</li>
+        </ul>
+      </details>
     </section>
 
-    <section class="lower-grid">
-      <section class="panel">
-        <div class="panel-heading"><div><h2>Add a target</h2><p>Only monitor systems you own or are authorized to test.</p></div></div>
-        <form id="add-form">
-          <label for="label">Display name</label>
-          <input id="label" name="label" placeholder="e.g. Home router">
-          <label for="host">Hostname or IP address</label>
-          <input id="host" name="host" placeholder="e.g. 192.168.1.1" required>
-          <button type="submit">Add host</button>
-          <p id="form-message" class="form-message" role="status"></p>
+    <div class="grid-2">
+      <!-- Add target form -->
+      <section class="panel" aria-labelledby="add-title">
+        <div class="panel-heading">
+          <div>
+            <h2 id="add-title">Add a host</h2>
+            <p class="muted">Only monitor systems you own or are authorized to test.</p>
+          </div>
+        </div>
+        <form id="add-form" class="add-form" novalidate>
+          <label for="host">Hostname or IPv4 address</label>
+          <input id="host" name="host" placeholder="e.g. 192.168.1.1 or example.com" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="host-error">
+          <p id="host-error" class="field-error" hidden></p>
+
+          <label for="label">Display name <span class="muted">(optional)</span></label>
+          <input id="label" name="label" placeholder="e.g. Home router" maxlength="80" autocomplete="off">
+
+          <button type="submit" id="add-submit" class="btn btn-primary btn-block">Add host</button>
         </form>
       </section>
-      <section class="panel">
-        <div class="panel-heading"><div><h2>Recent check history</h2><p>Latest 60 results across all targets.</p></div></div>
-        <div id="history" class="history"><p class="empty">Loading history…</p></div>
+
+      <!-- Recent history -->
+      <section class="panel" aria-labelledby="history-title">
+        <div class="panel-heading">
+          <div>
+            <h2 id="history-title">Recent checks</h2>
+            <p id="history-caption" class="muted">Newest first.</p>
+          </div>
+          <div class="panel-actions">
+            <label for="history-filter" class="visually-hidden">Show history for</label>
+            <select id="history-filter">
+              <option value="">All hosts</option>
+            </select>
+          </div>
+        </div>
+        <div class="history-wrap">
+          <table class="history-table">
+            <thead>
+              <tr><th scope="col">Time</th><th scope="col">Host</th><th scope="col">Result</th><th scope="col">Latency</th></tr>
+            </thead>
+            <tbody id="history">
+              <tr><td colspan="4" class="empty"><span class="spinner" aria-hidden="true"></span> Loading history…</td></tr>
+            </tbody>
+          </table>
+        </div>
       </section>
-    </section>
-    <footer>Built with Python, Flask, SQLite, and the system ping utility. Data stays on this computer.</footer>
+    </div>
+
+    <footer>Built with Python, Flask, SQLite, and the system <code>ping</code> command. All data stays on this computer.</footer>
   </main>
+
+  <!-- Short confirmation messages, e.g. "Host added" -->
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

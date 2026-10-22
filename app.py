@@ -39,6 +39,7 @@ MAX_INTERVAL_SECONDS = 300
 MAX_PARALLEL_PINGS = 8          # how many hosts are pinged at the same time
 RETENTION_DAYS = 7              # older check results are deleted
 AVAILABILITY_WINDOW_HOURS = 24  # period used for the reply-rate percentage
+MAX_HISTORY_ROWS = 500          # most rows the history view can request at once
 
 # Possible results of one check
 STATUS_UP = "up"                # an ICMP echo reply came back
@@ -492,17 +493,28 @@ def get_dashboard_data():
         item["availability"] = availability.get(item["id"], empty)
         rows.append(item)
 
-    total = len([row for row in rows if row["enabled"]])
-    checked = [row for row in rows if row["enabled"] and row["status"] is not None]
-    up = sum(1 for row in checked if row["status"] == STATUS_UP)
-    latencies = [row["latency_ms"] for row in checked if row["latency_ms"] is not None]
+    enabled = [row for row in rows if row["enabled"]]
+    checked = [row for row in enabled if row["status"] is not None]
+
+    def count_status(status):
+        return sum(1 for row in checked if row["status"] == status)
+
+    up = count_status(STATUS_UP)
+    # Average of each responding host's most recent latency.
+    latencies = [row["latency_ms"] for row in checked
+                 if row["status"] == STATUS_UP and row["latency_ms"] is not None]
     return {
         "targets": rows,
         "history": [dict(row) for row in reversed(history)],
         "summary": {
-            "total": total,
+            "total": len(enabled),
             "up": up,
-            "down": max(0, len(checked) - up),
+            "down": len(checked) - up,  # every checked host that did not reply
+            "no_reply": count_status(STATUS_NO_REPLY),
+            "dns_error": count_status(STATUS_DNS_ERROR),
+            "error": count_status(STATUS_ERROR),
+            "not_checked": len(enabled) - len(checked),
+            "paused": len(rows) - len(enabled),
             "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else None,
         },
         "monitor": monitor_worker.snapshot(),
@@ -570,6 +582,37 @@ def api_status():
     # Read-only: returns the latest saved results. The background worker
     # does the pinging.
     return jsonify(get_dashboard_data())
+
+
+@app.get("/api/history")
+def api_history():
+    """Recent check results, newest first. Optional: ?target_id=3&limit=100"""
+    raw_limit = request.args.get("limit", "100")
+    limit = int(raw_limit) if raw_limit.isdigit() else 0
+    if not 1 <= limit <= MAX_HISTORY_ROWS:
+        return jsonify({"error": f"limit must be a number from 1 to {MAX_HISTORY_ROWS}."}), 400
+
+    target_id = request.args.get("target_id", default=None)
+    sql = """
+        SELECT c.id, c.target_id, t.label, t.host, c.checked_at,
+               c.status, c.latency_ms, c.detail
+        FROM checks c JOIN targets t ON t.id = c.target_id
+    """
+    params = []
+    with get_db() as db:
+        if target_id not in (None, ""):
+            if not target_id.isdigit():
+                return jsonify({"error": "target_id must be a number."}), 400
+            if not db.execute("SELECT 1 FROM targets WHERE id = ?", (int(target_id),)).fetchone():
+                return jsonify({"error": "Target not found."}), 404
+            sql += " WHERE c.target_id = ?"
+            params.append(int(target_id))
+        # Sort by time. Pings run in parallel, so save order (id) is not
+        # always the same as the order the results came back in.
+        sql += " ORDER BY c.checked_at DESC, c.id DESC LIMIT ?"
+        params.append(limit)
+        rows = [dict(row) for row in db.execute(sql, params)]
+    return jsonify({"checks": rows, "limit": limit, "retention_days": RETENTION_DAYS})
 
 
 @app.post("/api/checks")

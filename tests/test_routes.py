@@ -22,7 +22,9 @@ def test_check_now_runs_checks_and_returns_summary(client, fake_ping):
 
     data = client.post("/api/checks").get_json()
 
-    assert data["summary"] == {"total": 3, "up": 2, "down": 1, "average_latency_ms": 15.0}
+    summary = data["summary"]
+    assert (summary["total"], summary["up"], summary["down"]) == (3, 2, 1)
+    assert summary["average_latency_ms"] == 15.0
     assert len(data["history"]) == 3
     by_host = {t["host"]: t for t in data["targets"]}
     assert by_host["8.8.8.8"]["status"] == "no_reply"
