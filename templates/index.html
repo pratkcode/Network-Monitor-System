@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Network Monitor</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">NETWORK OPERATIONS</p>
+        <h1>Network Monitor</h1>
+        <p class="subhead">A lightweight dashboard for connectivity, latency, and uptime checks.</p>
+      </div>
+      <div class="live"><span class="pulse"></span> Local monitoring</div>
+    </header>
+
+    <section class="metrics">
+      <article class="metric"><span>Monitored targets</span><strong id="total">—</strong><small>Enabled hosts</small></article>
+      <article class="metric"><span>Online</span><strong id="up" class="good">—</strong><small>Responding to ping</small></article>
+      <article class="metric"><span>Offline / no reply</span><strong id="down" class="bad">—</strong><small>May block ICMP</small></article>
+      <article class="metric"><span>Average latency</span><strong id="latency">—</strong><small>Across responding hosts</small></article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div><h2>Monitored hosts</h2><p id="monitor-status" role="status">Loading monitor status…</p></div>
+        <div class="panel-actions">
+          <form id="interval-form" class="interval-form">
+            <label for="interval">Check every</label>
+            <input id="interval" type="number" min="15" max="300" step="1" required aria-describedby="interval-help">
+            <span id="interval-help">sec (15–300)</span>
+            <button type="submit" class="secondary">Save</button>
+          </form>
+          <button id="refresh" class="secondary">Check now ↻</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Host</th><th>Address</th><th>Status</th><th>Latency</th><th>Last checked</th><th>Reply rate (24h)</th><th>Actions</th></tr></thead>
+          <tbody id="targets"><tr><td colspan="7" class="empty">Loading monitor data…</td></tr></tbody>
+        </table>
+      </div>
+      <p class="note">A failed ping does not always mean a host is down. Some networks block ICMP traffic.</p>
+      <p class="note"><strong>Reply rate</strong> = checks that got a ping reply ÷ checks recorded in the last 24 hours.
+        It only counts checks that actually ran: time when this app was closed, the Mac was asleep, or the host was paused is not included.</p>
+    </section>
+
+    <section class="lower-grid">
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Add a target</h2><p>Only monitor systems you own or are authorized to test.</p></div></div>
+        <form id="add-form">
+          <label for="label">Display name</label>
+          <input id="label" name="label" placeholder="e.g. Home router">
+          <label for="host">Hostname or IP address</label>
+          <input id="host" name="host" placeholder="e.g. 192.168.1.1" required>
+          <button type="submit">Add host</button>
+          <p id="form-message" class="form-message" role="status"></p>
+        </form>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Recent check history</h2><p>Latest 60 results across all targets.</p></div></div>
+        <div id="history" class="history"><p class="empty">Loading history…</p></div>
+      </section>
+    </section>
+    <footer>Built with Python, Flask, SQLite, and the system ping utility. Data stays on this computer.</footer>
+  </main>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
