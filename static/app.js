@@ -13,7 +13,11 @@ const state = {
   lastSuccessAt: null,       // when the server last answered
   connected: true,
   polling: false,
+  pollAgain: false,          // something changed while a refresh was running
   pending: new Set(),        // target ids with an action in progress
+  knownAlertIds: null,       // active alert ids seen on the previous refresh
+  lastRenderedAlerts: "",
+  lastRenderedAlertLog: "",
 };
 
 // ---------------------------------------------------------------------------
@@ -67,6 +71,13 @@ function formatDateTime(iso) {
     : date.toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
 }
 
+// Like formatDateTime, but with seconds (useful for short outages).
+function formatDateTimeSeconds(iso) {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "—"
+    : date.toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit"});
+}
+
 // "just now", "42s ago", "5m ago", "3h ago", or a date for older times.
 function timeAgo(iso) {
   const seconds = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
@@ -82,6 +93,15 @@ function timeUntil(iso) {
   const seconds = Math.round((new Date(iso).getTime() - Date.now()) / 1000);
   if (Number.isNaN(seconds)) return "";
   return seconds <= 0 ? "any moment" : `in ${seconds}s`;
+}
+
+// "45s", "12m", "3h 5m" between two timestamps.
+function formatDuration(fromIso, toIso) {
+  const seconds = Math.max(0, Math.round((new Date(toIso) - new Date(fromIso)) / 1000));
+  if (Number.isNaN(seconds)) return "—";
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`;
 }
 
 // A <time> element whose "x ago" text is refreshed every second by tick().
@@ -275,6 +295,71 @@ function renderHistory(data) {
     </tr>`).join("");
 }
 
+function hostName(item) {
+  return item.label !== item.host ? `${item.label} (${item.host})` : item.host;
+}
+
+function alertItem(alert) {
+  const failure = (STATUS_BADGES[alert.status] || [null, "No reply"])[1];
+  const lastReply = alert.last_reply_at ? ` · last reply ${escapeHtml(formatDateTimeSeconds(alert.last_reply_at))}` : "";
+  const stateLine = alert.resolved_at
+    ? `✓ Replying again since ${escapeHtml(formatClock(alert.resolved_at))} (no reply for about ${formatDuration(alert.created_at, alert.resolved_at)})`
+    : `Still not replying · started ${relativeTime(alert.created_at)}`;
+  return `<li class="alert-item ${alert.resolved_at ? "resolved" : ""}">
+    <div>
+      <div class="alert-title">${escapeHtml(hostName(alert))} stopped replying to ping</div>
+      <div class="alert-meta">${failure} at ${escapeHtml(formatDateTimeSeconds(alert.created_at))}${lastReply} · ${escapeHtml(alert.detail)}</div>
+      <div class="alert-state">${stateLine}</div>
+    </div>
+    <button type="button" class="btn btn-secondary btn-small" data-alert-id="${alert.id}"
+      aria-label="Dismiss alert for ${escapeHtml(alert.label)}">Dismiss</button>
+  </li>`;
+}
+
+function renderAlerts(active) {
+  // Pop up a toast for alerts that appeared since the last refresh.
+  // (Not on first page load, so old alerts don't all pop up at once.)
+  if (state.knownAlertIds) {
+    const fresh = active.filter(a => !state.knownAlertIds.has(a.id));
+    if (fresh.length) {
+      const more = fresh.length > 1 ? ` (+${fresh.length - 1} more)` : "";
+      showToast(`⚠ ${fresh[0].label} stopped replying to ping.${more}`, "warn");
+    }
+  }
+  state.knownAlertIds = new Set(active.map(a => a.id));
+  document.title = active.length ? `(${active.length}) Network Monitor` : "Network Monitor";
+
+  const key = JSON.stringify(active);
+  if (key === state.lastRenderedAlerts) return;
+  state.lastRenderedAlerts = key;
+  $("alerts").hidden = active.length === 0;
+  $("alerts-dismiss-all").hidden = active.length < 2;
+  $("alerts-title").textContent = active.length === 1 ? "Active alert" : `Active alerts (${active.length})`;
+  $("alerts-list").innerHTML = active.map(alertItem).join("");
+}
+
+function renderAlertLog(data) {
+  const key = JSON.stringify(data.events);
+  if (key === state.lastRenderedAlertLog) return;
+  state.lastRenderedAlertLog = key;
+  if (!data.events.length) {
+    $("alert-log").innerHTML = `<tr><td colspan="4" class="empty"><strong>No alerts yet</strong>An alert is recorded when a host that was replying stops replying.</td></tr>`;
+    return;
+  }
+  $("alert-log").innerHTML = data.events.map(e => {
+    const event = e.kind === "down"
+      ? '<span class="event-down">Stopped replying</span>'
+      : '<span class="event-recovered">Replying again</span>';
+    const dismissed = e.acknowledged_at ? ` · dismissed ${escapeHtml(formatClock(e.acknowledged_at))}` : "";
+    return `<tr>
+      <td class="num">${escapeHtml(formatDateTimeSeconds(e.created_at))}</td>
+      <td><div>${escapeHtml(e.label)}</div>${e.label !== e.host ? `<div class="host-address">${escapeHtml(e.host)}</div>` : ""}</td>
+      <td>${event}</td>
+      <td class="sub">${escapeHtml(e.detail)}${dismissed}</td>
+    </tr>`;
+  }).join("");
+}
+
 function renderInterval(monitor) {
   // Don't overwrite the box while the user is typing in it.
   if (document.activeElement !== $("interval")) $("interval").value = monitor.interval_seconds;
@@ -283,6 +368,7 @@ function renderInterval(monitor) {
 function renderStatus(data) {
   state.status = data;
   renderCards(data.summary);
+  renderAlerts(data.active_alerts);
   renderTargets(data.targets);
   renderHistoryFilter(data.targets);
   renderInterval(data.monitor);
@@ -307,6 +393,10 @@ function historyUrl() {
   return `/api/history?limit=${HISTORY_LIMIT}${target ? `&target_id=${encodeURIComponent(target)}` : ""}`;
 }
 
+async function loadAlertLog() {
+  renderAlertLog(await requestJson("/api/alerts?limit=50"));
+}
+
 async function loadHistory() {
   try {
     renderHistory(await requestJson(historyUrl()));
@@ -322,10 +412,13 @@ async function loadHistory() {
 
 // Re-read saved results from the server. This never sends pings.
 async function poll() {
-  if (state.polling) return;
+  if (state.polling) {
+    state.pollAgain = true;  // run once more when the current refresh ends
+    return;
+  }
   state.polling = true;
   try {
-    const [status] = await Promise.all([requestJson("/api/status"), loadHistory()]);
+    const [status] = await Promise.all([requestJson("/api/status"), loadHistory(), loadAlertLog()]);
     renderStatus(status);
     if (!state.connected) showToast("Reconnected to the monitoring server.");
     state.connected = true;
@@ -340,6 +433,10 @@ async function poll() {
     renderMonitorPill();
   } finally {
     state.polling = false;
+    if (state.pollAgain) {
+      state.pollAgain = false;
+      poll();
+    }
   }
 }
 
@@ -347,7 +444,8 @@ function showLoadError(message) {
   const html = (cols) => `<tr><td colspan="${cols}" class="empty"><strong>Could not load data</strong>${escapeHtml(message)}</td></tr>`;
   $("targets").innerHTML = html(6);
   $("history").innerHTML = html(4);
-  state.lastRenderedTargets = state.lastRenderedHistory = "";
+  $("alert-log").innerHTML = html(4);
+  state.lastRenderedTargets = state.lastRenderedHistory = state.lastRenderedAlertLog = "";
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +463,7 @@ async function checkNow({quiet = false} = {}) {
   button.innerHTML = '<span class="spinner" aria-hidden="true"></span>Checking…';
   try {
     renderStatus(await sendJson("/api/checks", "POST"));
-    await loadHistory();
+    await Promise.all([loadHistory(), loadAlertLog()]);
     if (!quiet) showToast("Check complete.");
   } catch (error) {
     if (error.status === 409) {
@@ -451,7 +549,7 @@ async function handleTargetAction(event) {
   if (!target || state.pending.has(id)) return;
 
   if (button.dataset.action === "remove" &&
-      !confirm(`Remove "${target.label}" and all of its saved check history?`)) {
+      !confirm(`Remove "${target.label}" and all of its saved check history and alerts?`)) {
     return;
   }
 
@@ -487,6 +585,29 @@ $("history-filter").addEventListener("change", () => {
   loadHistory().catch(reportActionError);
 });
 $("banner-close").addEventListener("click", hideBanner);
+$("alerts-list").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-alert-id]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await sendJson(`/api/alerts/${button.dataset.alertId}/acknowledge`, "POST");
+  } catch (error) {
+    reportActionError(error);
+  }
+  await poll();
+});
+$("alerts-dismiss-all").addEventListener("click", async () => {
+  $("alerts-dismiss-all").disabled = true;
+  try {
+    const data = await sendJson("/api/alerts/acknowledge-all", "POST");
+    showToast(data.message);
+  } catch (error) {
+    reportActionError(error);
+  } finally {
+    $("alerts-dismiss-all").disabled = false;
+  }
+  await poll();
+});
 
 poll();
 setInterval(poll, POLL_MS);

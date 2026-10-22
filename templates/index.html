@@ -28,6 +28,15 @@
       <button type="button" id="banner-close" class="icon-btn" aria-label="Dismiss message">✕</button>
     </div>
 
+    <!-- Active alerts: hosts that stopped replying (filled in by app.js) -->
+    <section id="alerts" class="alerts" aria-labelledby="alerts-title" aria-live="polite" hidden>
+      <div class="alerts-heading">
+        <h2 id="alerts-title">Active alerts</h2>
+        <button type="button" id="alerts-dismiss-all" class="btn btn-secondary btn-small">Dismiss all</button>
+      </div>
+      <ul id="alerts-list" class="alerts-list"></ul>
+    </section>
+
     <!-- Summary cards -->
     <section class="cards" aria-label="Summary">
       <article class="card">
@@ -147,6 +156,26 @@
         </div>
       </section>
     </div>
+
+    <!-- Alert log -->
+    <section class="panel alert-log" aria-labelledby="alert-log-title">
+      <div class="panel-heading">
+        <div>
+          <h2 id="alert-log-title">Alert log</h2>
+          <p class="muted">Recorded when a host stops replying after it had been replying, and when it replies again. Repeated failed checks do not create new alerts.</p>
+        </div>
+      </div>
+      <div class="history-wrap">
+        <table class="history-table">
+          <thead>
+            <tr><th scope="col">Time</th><th scope="col">Host</th><th scope="col">Event</th><th scope="col">Details</th></tr>
+          </thead>
+          <tbody id="alert-log">
+            <tr><td colspan="4" class="empty"><span class="spinner" aria-hidden="true"></span> Loading alerts…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
     <footer>Built with Python, Flask, SQLite, and the system <code>ping</code> command. All data stays on this computer.</footer>
   </main>

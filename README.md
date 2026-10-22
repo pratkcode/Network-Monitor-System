@@ -52,6 +52,8 @@ Then open http://127.0.0.1:5050.
 3. The dashboard reads the saved results from `/api/status` every 5 seconds. **Check now** runs an extra check cycle immediately.
 4. The **Reply rate (24h)** column is the share of recorded checks in the last 24 hours that got a ping reply. Time when the app was closed, the Mac was asleep, or a target was paused is not counted.
 
+5. **Alerts:** when a host that was replying stops replying, an alert appears at the top of the dashboard (and the browser tab title shows the count). It is recorded once, not on every failed check. When the host replies again, a "recovered" event is recorded. Alerts stay until you dismiss them, and the **Alert log** keeps the history. There is no email or SMS.
+
 Checks only run while `app.py` is running. Closing the browser tab does not stop them; stopping the app (`Ctrl+C`) does.
 
 ## Automated tests

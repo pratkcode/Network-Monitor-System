@@ -41,6 +41,14 @@ RETENTION_DAYS = 7              # older check results are deleted
 AVAILABILITY_WINDOW_HOURS = 24  # period used for the reply-rate percentage
 MAX_HISTORY_ROWS = 500          # most rows the history view can request at once
 
+# Alerts: raise an alert when a host that was replying stops replying for this
+# many checks in a row. 1 = alert on the first missed reply. 2 or more means a
+# single lost ping packet will not cause an alert (fewer false alarms, but the
+# alert arrives one or more intervals later).
+ALERT_AFTER_FAILURES = 1
+ALERT_DOWN = "down"             # host stopped replying to ping
+ALERT_RECOVERED = "recovered"   # host replied again after a "down" alert
+
 # Possible results of one check
 STATUS_UP = "up"                # an ICMP echo reply came back
 STATUS_NO_REPLY = "no_reply"    # no reply: offline, OR ping is blocked
@@ -121,6 +129,21 @@ def init_db():
             )
         """)
         db.execute("""
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id INTEGER NOT NULL,
+                host TEXT NOT NULL,       -- copied, so the alert still makes
+                label TEXT NOT NULL,      -- sense if the target is renamed
+                kind TEXT NOT NULL,       -- 'down' or 'recovered'
+                status TEXT NOT NULL,     -- check status that caused the alert
+                detail TEXT,
+                created_at TEXT NOT NULL,
+                last_reply_at TEXT,       -- down: time of the last good reply
+                resolved_at TEXT,         -- down: when the host replied again
+                acknowledged_at TEXT      -- down: when someone dismissed it
+            )
+        """)
+        db.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -143,6 +166,7 @@ def init_db():
 
         db.execute("CREATE INDEX IF NOT EXISTS idx_checks_target ON checks(target_id, id)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_checks_time ON checks(checked_at)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_alerts_target ON alerts(target_id, kind)")
         db.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('interval_seconds', ?)",
             (str(DEFAULT_INTERVAL_SECONDS),),
@@ -178,11 +202,19 @@ def set_interval_seconds(seconds):
         )
 
 
-def prune_old_checks():
-    """Delete check results older than RETENTION_DAYS."""
+def prune_old_records():
+    """Delete check results and finished alerts older than RETENTION_DAYS.
+
+    Alerts that nobody has dismissed yet are always kept.
+    """
     cutoff = to_iso(utc_now() - timedelta(days=RETENTION_DAYS))
     with get_db() as db:
         db.execute("DELETE FROM checks WHERE checked_at < ?", (cutoff,))
+        db.execute("""
+            DELETE FROM alerts
+            WHERE created_at < ?
+              AND (kind = 'recovered' OR acknowledged_at IS NOT NULL)
+        """, (cutoff,))
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +337,59 @@ def check_target(target):
     return target, result, to_iso(utc_now())
 
 
+def detect_alert(db, target, result, checked_at):
+    """Record an alert if this check changed the target's state.
+
+    Call this right after the new check has been saved. Returns the kind of
+    alert recorded ('down' or 'recovered'), or None.
+
+    - 'down': the host had been replying, and has now missed
+      ALERT_AFTER_FAILURES checks in a row. Later failures add nothing,
+      so the same alert is never repeated on every failed check.
+    - 'recovered': the host replied again while a 'down' alert was open.
+    """
+    if result.status == STATUS_UP:
+        open_alerts = db.execute(
+            "SELECT id FROM alerts WHERE target_id = ? AND kind = ? AND resolved_at IS NULL",
+            (target["id"], ALERT_DOWN),
+        ).fetchall()
+        if not open_alerts:
+            return None
+        db.execute(
+            "UPDATE alerts SET resolved_at = ? WHERE target_id = ? AND kind = ? AND resolved_at IS NULL",
+            (checked_at, target["id"], ALERT_DOWN),
+        )
+        db.execute(
+            """INSERT INTO alerts (target_id, host, label, kind, status, detail, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (target["id"], target["host"], target["label"], ALERT_RECOVERED,
+             result.status, result.detail, checked_at),
+        )
+        app.logger.warning("RECOVERED: %s (%s) is replying to ping again", target["label"], target["host"])
+        return ALERT_RECOVERED
+
+    # The newest checks for this target, newest first (includes the one just saved).
+    recent = db.execute(
+        "SELECT status, checked_at FROM checks WHERE target_id = ? ORDER BY id DESC LIMIT ?",
+        (target["id"], ALERT_AFTER_FAILURES + 1),
+    ).fetchall()
+    if len(recent) <= ALERT_AFTER_FAILURES:
+        return None  # not enough history: the host has never been seen replying
+    failures, before = recent[:ALERT_AFTER_FAILURES], recent[ALERT_AFTER_FAILURES]
+    if before["status"] != STATUS_UP or any(row["status"] == STATUS_UP for row in failures):
+        return None  # either it was already failing, or it hasn't failed enough times yet
+
+    db.execute(
+        """INSERT INTO alerts (target_id, host, label, kind, status, detail, created_at, last_reply_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (target["id"], target["host"], target["label"], ALERT_DOWN,
+         result.status, result.detail, checked_at, before["checked_at"]),
+    )
+    app.logger.warning("ALERT: %s (%s) stopped replying to ping: %s",
+                       target["label"], target["host"], result.detail)
+    return ALERT_DOWN
+
+
 def run_checks():
     """Ping every enabled target once and save the results.
 
@@ -340,7 +425,9 @@ def run_checks():
                     (target["id"], checked_at, int(result.status == STATUS_UP),
                      result.latency_ms, result.detail, result.status),
                 )
-                results.append({**target, **result._asdict(), "checked_at": checked_at})
+                alert = detect_alert(db, target, result, checked_at)
+                results.append({**target, **result._asdict(), "checked_at": checked_at,
+                                "alert": alert})
         return results
     finally:
         check_lock.release()
@@ -393,7 +480,7 @@ class MonitorWorker:
         self.last_cycle_started_at = to_iso(utc_now())
         try:
             run_checks()
-            prune_old_checks()
+            prune_old_records()
             self.last_error = None
         except Exception as error:  # keep the worker alive after any error
             app.logger.exception("Monitoring cycle failed")
@@ -465,6 +552,14 @@ def get_availability(db, window_hours=AVAILABILITY_WINDOW_HOURS):
     }
 
 
+def get_active_alerts(db):
+    """'down' alerts that nobody has dismissed yet, newest first."""
+    return [dict(row) for row in db.execute(
+        "SELECT * FROM alerts WHERE kind = ? AND acknowledged_at IS NULL ORDER BY id DESC",
+        (ALERT_DOWN,),
+    )]
+
+
 def get_dashboard_data():
     with get_db() as db:
         targets = db.execute("""
@@ -485,6 +580,7 @@ def get_dashboard_data():
             ORDER BY c.id DESC LIMIT 60
         """).fetchall()
         availability = get_availability(db)
+        active_alerts = get_active_alerts(db)
 
     empty = {"percent": None, "checks": 0, "replies": 0, "first_check_at": None}
     rows = []
@@ -517,6 +613,7 @@ def get_dashboard_data():
             "paused": len(rows) - len(enabled),
             "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else None,
         },
+        "active_alerts": active_alerts,
         "monitor": monitor_worker.snapshot(),
         "availability_window_hours": AVAILABILITY_WINDOW_HOURS,
         "retention_days": RETENTION_DAYS,
@@ -615,6 +712,46 @@ def api_history():
     return jsonify({"checks": rows, "limit": limit, "retention_days": RETENTION_DAYS})
 
 
+@app.get("/api/alerts")
+def api_alerts():
+    """Active (not dismissed) alerts, plus the recent alert log. ?limit=50"""
+    raw_limit = request.args.get("limit", "50")
+    limit = int(raw_limit) if raw_limit.isdigit() else 0
+    if not 1 <= limit <= MAX_HISTORY_ROWS:
+        return jsonify({"error": f"limit must be a number from 1 to {MAX_HISTORY_ROWS}."}), 400
+    with get_db() as db:
+        events = [dict(row) for row in db.execute(
+            "SELECT * FROM alerts ORDER BY created_at DESC, id DESC LIMIT ?", (limit,))]
+        active = get_active_alerts(db)
+    return jsonify({"active": active, "events": events, "limit": limit,
+                    "alert_after_failures": ALERT_AFTER_FAILURES})
+
+
+@app.post("/api/alerts/<int:alert_id>/acknowledge")
+def acknowledge_alert(alert_id):
+    """Dismiss one alert from the dashboard. It stays in the alert log."""
+    with get_db() as db:
+        row = db.execute("SELECT kind FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+        if row is None:
+            return jsonify({"error": "Alert not found."}), 404
+        db.execute(
+            "UPDATE alerts SET acknowledged_at = ? WHERE id = ? AND acknowledged_at IS NULL",
+            (to_iso(utc_now()), alert_id),
+        )
+    return jsonify({"message": "Alert dismissed."})
+
+
+@app.post("/api/alerts/acknowledge-all")
+def acknowledge_all_alerts():
+    with get_db() as db:
+        cursor = db.execute(
+            "UPDATE alerts SET acknowledged_at = ? WHERE kind = ? AND acknowledged_at IS NULL",
+            (to_iso(utc_now()), ALERT_DOWN),
+        )
+        count = cursor.rowcount
+    return jsonify({"message": f"Dismissed {count} alert(s).", "dismissed": count})
+
+
 @app.post("/api/checks")
 def api_check_now():
     """Run a check cycle immediately (the "Check now" button)."""
@@ -677,6 +814,7 @@ def add_target():
 def delete_target(target_id):
     with get_db() as db:
         db.execute("DELETE FROM checks WHERE target_id = ?", (target_id,))
+        db.execute("DELETE FROM alerts WHERE target_id = ?", (target_id,))
         result = db.execute("DELETE FROM targets WHERE id = ?", (target_id,))
         deleted = result.rowcount
     if deleted == 0:

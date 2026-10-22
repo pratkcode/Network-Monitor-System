@@ -296,7 +296,7 @@ def test_upgrade_from_phase1_database_keeps_history(tmp_path):
 def test_checks_older_than_retention_are_deleted(db_path):
     insert_check(db_path, 1, "up", timedelta(days=monitor.RETENTION_DAYS, hours=1))
     insert_check(db_path, 1, "up", timedelta(days=monitor.RETENTION_DAYS - 1))
-    monitor.prune_old_checks()
+    monitor.prune_old_records()
     with sqlite3.connect(db_path) as db:
         assert db.execute("SELECT COUNT(*) FROM checks").fetchone()[0] == 1
 
